@@ -6904,6 +6904,7 @@ plugin_virt="no"
 plugin_vmem="no"
 plugin_vserver="no"
 plugin_wireless="no"
+plugin_write_file_test="yes"
 plugin_write_graphite="yes"
 plugin_write_http="yes"
 plugin_write_influxdb_udp="yes"
@@ -7610,6 +7611,7 @@ AC_PLUGIN([virt],                [$plugin_virt],              [Virtual machine s
 AC_PLUGIN([vmem],                [$plugin_vmem],              [Virtual memory statistics])
 AC_PLUGIN([vserver],             [$plugin_vserver],           [Linux VServer statistics])
 AC_PLUGIN([wireless],            [$plugin_wireless],          [Wireless statistics])
+AC_PLUGIN([write_file_test],     [$plugin_write_file_test],   [File output plugin])
 AC_PLUGIN([write_graphite],      [$plugin_write_graphite],    [Graphite / Carbon output plugin])
 AC_PLUGIN([write_http],          [$plugin_write_http],        [HTTP output plugin])
 AC_PLUGIN([write_influxdb_udp],  [$plugin_write_influxdb_udp],[Influxdb udp output plugin])
@@ -8057,6 +8059,7 @@ AC_MSG_RESULT([    virt  . . . . . . . . $enable_virt])
 AC_MSG_RESULT([    vmem  . . . . . . . . $enable_vmem])
 AC_MSG_RESULT([    vserver . . . . . . . $enable_vserver])
 AC_MSG_RESULT([    wireless  . . . . . . $enable_wireless])
+AC_MSG_RESULT([    write_file_test . . . $enable_write_file_test])
 AC_MSG_RESULT([    write_graphite  . . . $enable_write_graphite])
 AC_MSG_RESULT([    write_http  . . . . . $enable_write_http])
 AC_MSG_RESULT([    write_influxdb_udp. . $enable_write_influxdb_udp])
