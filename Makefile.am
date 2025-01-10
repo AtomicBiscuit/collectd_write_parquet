@@ -2316,7 +2316,7 @@ endif
 
 if BUILD_PLUGIN_WRITE_FILE_TEST
 pkglib_LTLIBRARIES += write_file_test.la
-write_file_test_la_SOURCES = src/write_file_test.c
+write_file_test_la_SOURCES = src/write_file_test.cc
 write_file_test_la_LDFLAGS = $(PLUGIN_LDFLAGS)
 endif
 
