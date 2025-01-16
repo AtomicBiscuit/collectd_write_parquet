@@ -34,47 +34,59 @@ extern "C" {
 }
 
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
 
-static const char *config_keys[] = {"File", "Duration"};
+static const char *config_keys[] = {"BaseDir", "Duration"};
 static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
 
 namespace {
-class DirectoryHandler {
+class Directory {
 private:
   static const inline std::string base_name = "active";
-  std::string path{};
+  std::filesystem::path path{};
   std::ofstream file_handler{};
   std::chrono::seconds delta;
   std::chrono::system_clock::time_point creation_time{};
   std::mutex mut;
 
 public:
-  DirectoryHandler() : path(""), delta(0) {}
+  Directory(const std::filesystem::path &path, std::chrono::seconds delta)
+      : path(path), delta(delta),
+        creation_time(std::chrono::system_clock::now()) {
+    recreate_();
+  };
 
-  DirectoryHandler(std::string path, int delta)
-      : path(path), delta(std::chrono::seconds(delta)) {}
+  Directory(const Directory &other)
+      : path(other.path), delta(other.delta),
+        creation_time(std::chrono::system_clock::now()) {
+    recreate_();
+  }
 
-  DirectoryHandler(const DirectoryHandler &other)
-      : path(other.path), delta(other.delta) {}
-
-  void set_path(std::string &&other) { path = std::move(other); }
-
-  void set_delta(int other) { delta = std::chrono::seconds(other); }
+  Directory &operator=(const Directory &other) {
+    if (file_handler.is_open()) {
+      file_handler.close();
+    }
+    path = other.path;
+    delta = other.delta;
+    return *this;
+  }
 
   int write(const std::string &data) {
     std::lock_guard lock(mut);
     if (std::chrono::system_clock::now() - creation_time > delta) {
-      creation_time = std::chrono::system_clock::now();
       if (int err = recreate_()) {
         return err;
       }
+      creation_time = std::chrono::system_clock::now();
     }
     file_handler.write(data.c_str(), data.size());
+    file_handler.flush();
     return 0;
   }
 
@@ -84,91 +96,117 @@ private:
       file_handler.close();
 
       tm time_tm = {0};
-      char time_buf[20]; // "1999-01-01 12:11:10" - 19 symbols
+      char time_buf[20];
 
-      time_t now = time(nullptr);
+      time_t now = std::chrono::system_clock::to_time_t(creation_time);
       localtime_r(&now, &time_tm);
       strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H.%M.%S", &time_tm);
 
-      if (rename((path + "/" + base_name).c_str(),
-                 (path + "/" + time_buf).c_str()) != 0) {
-        P_ERROR("file renaming (%s) failed: %s",
-                (path + "/" + base_name).c_str(),
-                std::to_string(errno).c_str());
+      std::error_code er{};
+      std::filesystem::rename(path / base_name, path / time_buf, er);
+      if (er) {
+        P_ERROR("file renaming (%s) failed: %s", (path / base_name).c_str(),
+                std::to_string(er.value()).c_str());
         return EINVAL;
       }
     }
-
-    file_handler.open(path + "/" + base_name, std::ios::app);
+    file_handler.open(path / base_name, std::ios::app);
     if (not file_handler.is_open()) {
-      P_ERROR("file opening (%s) failed: %s", (path + "/" + base_name).c_str(),
+      P_ERROR("file opening (%s) failed: %s", (path / base_name).c_str(),
               std::to_string(errno).c_str());
       return EINVAL;
     }
     return 0;
   }
 };
+
+class DirectoryHandler {
+  std::map<std::string, Directory> dirs_;
+  std::filesystem::path base_dir;
+  std::chrono::seconds delta;
+
+public:
+  DirectoryHandler() = default;
+
+  void set_path(const std::string &path) { base_dir = path; }
+
+  void set_delta(int seconds) { delta = std::chrono::seconds(seconds); }
+
+  Directory &get(const std::string &name) {
+    if (dirs_.find(name) != dirs_.end()) {
+      return dirs_.at(name);
+    }
+    std::error_code err{};
+    std::filesystem::create_directories(base_dir / name, err);
+    if (err) {
+      P_ERROR("%s", err.message().c_str());
+    }
+    dirs_.emplace(name, Directory(base_dir / name, delta));
+    return dirs_.at(name);
+  }
+};
 } // namespace
 
-static DirectoryHandler dir{};
+static DirectoryHandler dirs{};
 static enum class StreamType { file, out, err } stream_type = StreamType::out;
 
-static int wf_write_callback(metric_family_t const *fam,
-                             __attribute__((unused)) user_data_t *user_data) {
+static std::string wf_parse_metric(metric_t *mt) {
   std::stringstream stream;
 
-  stream << "family: " << fam->name << "\n";
-  stream << "resources:\n";
-  for (size_t j = 0; j < fam->resource.num; j++) {
-    label_pair_t *l = fam->resource.ptr + j;
-    stream << "        " << l->name << ": " << l->value << "\n";
-  }
-  stream << "\n";
-
-  strbuf_t buf = STRBUF_CREATE;
   tm time_tm = {0};
   char time_buf[20];
 
-  for (size_t i = 0; i < fam->metric.num; i++) {
-    metric_t *mt = fam->metric.ptr + i;
+  time_t tmp = CDTIME_T_TO_TIME_T(mt->time);
+  localtime_r(&tmp, &time_tm);
+  strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &time_tm);
+  stream << "    (" << time_buf << ") ";
 
-    time_t tmp = CDTIME_T_TO_TIME_T(mt->time);
-    localtime_r(&tmp, &time_tm);
-    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &time_tm);
-    stream << "    (" << time_buf << ") ";
-
-    value_marshal_text(&buf, mt->value, fam->type);
-    stream << "    value " << buf.ptr << " of type "
-           << (METRIC_TYPE_TO_STRING(fam->type)) << "\n";
-
-    stream << "    labels:\n";
-
-    strbuf_reset(&buf);
-
-    for (size_t j = 0; j < mt->label.num; j++) {
-      label_pair_t *l = mt->label.ptr + j;
-      stream << "        " << l->name << " " << l->value << "\n";
-    }
-    stream << "\n";
-  }
+  strbuf_t buf = STRBUF_CREATE;
+  value_marshal_text(&buf, mt->value, mt->family->type);
+  stream << "    value " << buf.ptr << " of type "
+         << (METRIC_TYPE_TO_STRING(mt->family->type)) << "\n\n";
   STRBUF_DESTROY(buf);
 
-  dir.write(stream.str());
+  return stream.str();
+}
+
+static int wf_write_callback(metric_family_t const *fam,
+                             user_data_t *user_data) {
+  auto host = label_set_get(fam->resource, "host.name");
+  if (not host) {
+    P_ERROR("Unexpected metric family resource");
+    return ENOENT;
+  }
+  std::filesystem::path base;
+  std::string_view tmp = host;
+  tmp.remove_suffix(1);
+  base /= tmp;
+  base /= fam->name;
+  for (size_t i = 0; i < fam->metric.num; i++) {
+    metric_t *mt = fam->metric.ptr + i;
+    std::filesystem::path full_path = base;
+    for (size_t j = 0; j < mt->label.num; j++) {
+      label_pair_t *lab = mt->label.ptr + j;
+      full_path /= lab->value;
+      wf_parse_metric(mt);
+      dirs.get(full_path.string()).write(wf_parse_metric(mt));
+    }
+  }
   return 0;
 }
 
 static int wf_config_callback(const char *key, const char *value) {
-  if (strcasecmp("File", key) == 0) {
+  if (strcasecmp("BaseDir", key) == 0) {
     if (strcasecmp(value, "stdout") == 0) {
       stream_type = StreamType::out;
     } else if (strcasecmp(value, "stderr") == 0) {
       stream_type = StreamType::err;
     } else {
       stream_type = StreamType::file;
-      dir.set_path(value);
+      dirs.set_path(value);
     }
   } else if (strcasecmp("Duration", key) == 0) {
-    dir.set_delta(std::strtoul(value, NULL, 10));
+    dirs.set_delta(std::strtoul(value, NULL, 10));
   } else {
     P_ERROR("Invalid configuration option (%s)", key);
     return -EINVAL;
