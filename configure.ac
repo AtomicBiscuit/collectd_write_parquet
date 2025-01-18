@@ -4255,6 +4255,96 @@ AC_SUBST([BUILD_WITH_LIBOWCAPI_LDFLAGS])
 AC_SUBST([BUILD_WITH_LIBOWCAPI_LIBS])
 # }}}
 
+# --with-libparquet {{{
+AC_ARG_WITH([libparquet],
+  [AS_HELP_STRING([--with-libparquet@<:@=PREFIX@:>@], [Path to libparquet.])],
+  [
+    with_libparquet="$withval"
+    if test "x$withval" != "xno" && test "x$withval" != "xyes"; then
+      with_libparquet_cppflags="-I$withval/include"
+      with_libparquet_ldflags="-L$withval/lib"
+      with_libparquet="yes"
+    fi
+    if test "x$withval" = "xno"; then
+      with_libparquet="no (disabled on command line)"
+    fi
+  ],
+  [withval="yes"]
+)
+if test "x$withval" = "xyes"; then
+PKG_CHECK_MODULES([PARQUET], [arrow parquet],
+  [with_libparquet="yes"],
+  [with_libparquet="no (pkg-config could not find libparquet)"]
+)
+fi
+
+if test "x$withval" != "xno"; then
+  AC_MSG_CHECKING([whether $CXX accepts -std=c++17])
+  if test_cxx_flags -std=c++17; then
+    AC_MSG_RESULT([yes])
+  else
+    AC_MSG_RESULT([no])
+    with_libparquet="no (requires C++17 support)"
+    fi
+fi
+
+if test "x$with_libparquet" = "xyes"; then
+  AC_LANG_PUSH(C++)
+  SAVE_CPPFLAGS="$CPPFLAGS"
+  CPPFLAGS="-std=c++17 $with_libparquet_cppflags $CPPFLAGS"
+  AC_CHECK_HEADERS([arrow/api.h parquet/arrow/writer.h],
+    [with_libparquet="yes"],
+    [with_libparquet="no"]
+  )
+  CPPFLAGS="$SAVE_CPPFLAGS"
+  AC_LANG_POP(C++)
+fi
+
+if test "x$with_libparquet" = "xyes"; then
+  AC_LANG_PUSH(C++)
+  SAVE_CPPFLAGS="$CPPFLAGS"
+  SAVE_LDFLAGS="$LDFLAGS"
+  SAVE_LIBS="$LIBS"
+  CPPFLAGS="-std=c++17 $with_libparquet_cppflags $CPPFLAGS"
+  LDFLAGS="$with_libparquet_ldflags"
+  if test "x$PARQUET_LIBS" = "x"; then
+    LIBS="-larrow -lparquet"
+  else
+    LIBS="$PARQUET_LIBS"
+  fi
+  AC_LINK_IFELSE(
+    [
+      AC_LANG_PROGRAM(
+        [[
+        #include <arrow/api.h>
+        #include <parquet/arrow/writer.h>
+        arrow::Status st;
+        parquet::WriterProperties::Builder builder;
+        ]]
+      )
+    ],
+    [
+      with_libparquet="yes"
+      if test "x$PARQUET_LIBS" = "x"; then
+        PARQUET_LIBS="-larrow -lparquet"
+      fi
+    ],
+    [with_libparquet="no (libparquet not found)"]
+  )
+  CPPFLAGS="$SAVE_CPPFLAGS"
+  LDFLAGS="$SAVE_LDFLAGS"
+  LIBS="$SAVE_LIBS"
+  AC_LANG_POP(C++)
+fi
+
+BUILD_WITH_LIBPARQUET_CPPFLAGS="-std=c++17 $with_libparquet_cppflags"
+BUILD_WITH_LIBPARQUET_LDFLAGS="$with_libparquet_ldflags"
+BUILD_WITH_LIBPARQUET_LIBS="-larrow -lparquet"
+AC_SUBST([BUILD_WITH_LIBPARQUET_CPPFLAGS])
+AC_SUBST([BUILD_WITH_LIBPARQUET_LDFLAGS])
+AC_SUBST([BUILD_WITH_LIBPARQUET_LIBS])
+# }}}
+
 # --with-libpcap {{{
 AC_ARG_WITH([libpcap],
   [AS_HELP_STRING([--with-libpcap@<:@=PREFIX@:>@], [Path to libpcap.])],
@@ -6904,7 +6994,7 @@ plugin_virt="no"
 plugin_vmem="no"
 plugin_vserver="no"
 plugin_wireless="no"
-plugin_write_file_test="yes"
+plugin_write_file_test="no"
 plugin_write_graphite="yes"
 plugin_write_http="yes"
 plugin_write_influxdb_udp="yes"
@@ -6960,6 +7050,7 @@ if test "x$ac_system" = "xLinux"; then
   plugin_vmem="yes"
   plugin_vserver="yes"
   plugin_wireless="yes"
+  plugin_write_file_test="$with_libparquet"
   plugin_zfs_arc="yes"
 
   if test "x$ac_cv_header_linux_ip_vs_h" = "xyes"; then
@@ -7859,6 +7950,7 @@ AC_MSG_RESULT([    libnvidia-ml  . . . . $with_cuda])
 AC_MSG_RESULT([    libopenipmi . . . . . $with_libopenipmipthread])
 AC_MSG_RESULT([    liboping  . . . . . . $with_liboping])
 AC_MSG_RESULT([    libowcapi . . . . . . $with_libowcapi])
+AC_MSG_RESULT([    libparquet  . . . . . $with_libparquet])
 AC_MSG_RESULT([    libpcap . . . . . . . $with_libpcap])
 AC_MSG_RESULT([    libperfstat . . . . . $with_perfstat])
 AC_MSG_RESULT([    libperl . . . . . . . $with_libperl])

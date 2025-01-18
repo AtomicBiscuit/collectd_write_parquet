@@ -33,14 +33,23 @@ extern "C" {
 #include <stdio.h>
 }
 
+#include <arrow/api.h>
+#include <arrow/io/file.h>
 #include <chrono>
 #include <filesystem>
-#include <fstream>
-#include <iostream>
 #include <map>
 #include <mutex>
-#include <sstream>
-#include <string>
+#include <parquet/arrow/writer.h>
+#include <parquet/stream_writer.h>
+
+#define LOG_AND_RETURN_ON_ERROR(s, msg, ...)                                   \
+  int state = static_cast<int>((s));                                           \
+  if (state != 0) {                                                            \
+    P_ERROR((std::string((msg)) + ": %i").c_str(), __VA_ARGS__, state);        \
+    return state;                                                              \
+  }                                                                            \
+  }                                                                            \
+  while (0)
 
 static const char *config_keys[] = {"BaseDir", "Duration"};
 static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
@@ -48,16 +57,27 @@ static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
 namespace {
 class Directory {
 private:
-  static const inline std::string base_name = "active";
+  static const inline std::string base_name = "active.parquet";
   std::filesystem::path path{};
-  std::ofstream file_handler{};
+
   std::chrono::seconds delta;
   std::chrono::system_clock::time_point creation_time{};
+
+  std::shared_ptr<arrow::io::FileOutputStream> file_handler{};
+  parquet::StreamWriter writer;
+  std::shared_ptr<parquet::schema::GroupNode> schema =
+      std::static_pointer_cast<parquet::schema::GroupNode>(
+          parquet::schema::GroupNode::Make("schema",
+                                           parquet::Repetition::REQUIRED,
+                                           {parquet::schema::Double("value")}));
+
   std::mutex mut;
 
 public:
-  Directory(const std::filesystem::path &path, std::chrono::seconds delta)
-      : path(path), delta(delta),
+  static inline parquet::WriterProperties::Builder builder{};
+
+  Directory(std::filesystem::path path, std::chrono::seconds delta)
+      : path(std::move(path)), delta(delta),
         creation_time(std::chrono::system_clock::now()) {
     recreate_();
   };
@@ -69,15 +89,18 @@ public:
   }
 
   Directory &operator=(const Directory &other) {
-    if (file_handler.is_open()) {
-      file_handler.close();
+    if (&other == this) {
+      return *this;
+    }
+    if (file_handler) {
+      PARQUET_IGNORE_NOT_OK(file_handler->Close());
     }
     path = other.path;
     delta = other.delta;
     return *this;
   }
 
-  int write(const std::string &data) {
+  int write(double data) {
     std::lock_guard lock(mut);
     if (std::chrono::system_clock::now() - creation_time > delta) {
       if (int err = recreate_()) {
@@ -85,45 +108,58 @@ public:
       }
       creation_time = std::chrono::system_clock::now();
     }
-    file_handler.write(data.c_str(), data.size());
-    file_handler.flush();
+    // P_WARNING("%i %li %i", writer.current_column(), writer.current_row(),
+    //           writer.num_columns());
+    writer << data << parquet::EndRow;
+    // writer << parquet::EndRowGroup;
+    //  P_WARNING("data: %f", data);
+    // PARQUET_IGNORE_NOT_OK(file_handler->Flush());
     return 0;
   }
 
 private:
   int recreate_() {
-    if (file_handler.is_open()) {
-      file_handler.close();
+    if (file_handler and not file_handler->closed()) {
+      // writer.~StreamWriter();
+      writer = parquet::StreamWriter();
+      LOG_AND_RETURN_ON_ERROR(file_handler->Close().code(),
+                              "file closing (%s) failed",
+                              (path / base_name).c_str());
 
       tm time_tm = {0};
-      char time_buf[20];
+      char time_buf[28];
 
       time_t now = std::chrono::system_clock::to_time_t(creation_time);
       localtime_r(&now, &time_tm);
-      strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H.%M.%S", &time_tm);
+      strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H.%M.%S.parquet",
+               &time_tm);
 
       std::error_code er{};
       std::filesystem::rename(path / base_name, path / time_buf, er);
-      if (er) {
-        P_ERROR("file renaming (%s) failed: %s", (path / base_name).c_str(),
-                std::to_string(er.value()).c_str());
-        return EINVAL;
-      }
+      LOG_AND_RETURN_ON_ERROR(er.value(), "file renaming (%s) failed",
+                              (path / base_name).c_str());
     }
-    file_handler.open(path / base_name, std::ios::app);
-    if (not file_handler.is_open()) {
-      P_ERROR("file opening (%s) failed: %s", (path / base_name).c_str(),
-              std::to_string(errno).c_str());
-      return EINVAL;
-    }
+    auto res = arrow::io::FileOutputStream::Open(path / base_name, false);
+    LOG_AND_RETURN_ON_ERROR(res.status().code(), "file opening (%s) failed",
+                            (path / base_name).c_str());
+    file_handler = std::move(res.ValueOrDie());
+
+    // builder.compression(parquet::Compression::BROTLI);
+    writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
+        file_handler,
+        std::static_pointer_cast<parquet::schema::GroupNode>(
+            parquet::schema::GroupNode::Make(
+                "schema", parquet::Repetition::REQUIRED,
+                {parquet::schema::Double("value")})),
+        builder.build())};
     return 0;
   }
 };
 
 class DirectoryHandler {
-  std::map<std::string, Directory> dirs_;
-  std::filesystem::path base_dir;
-  std::chrono::seconds delta;
+  std::map<std::string, Directory> dirs_{};
+  std::filesystem::path base_dir{};
+  std::chrono::seconds delta{};
 
 public:
   DirectoryHandler() = default;
@@ -150,36 +186,36 @@ public:
 static DirectoryHandler dirs{};
 static enum class StreamType { file, out, err } stream_type = StreamType::out;
 
-static std::string wf_parse_metric(metric_t *mt) {
-  std::stringstream stream;
-
-  tm time_tm = {0};
-  char time_buf[20];
-
-  time_t tmp = CDTIME_T_TO_TIME_T(mt->time);
-  localtime_r(&tmp, &time_tm);
-  strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &time_tm);
-  stream << "    (" << time_buf << ") ";
-
-  strbuf_t buf = STRBUF_CREATE;
-  value_marshal_text(&buf, mt->value, mt->family->type);
-  stream << "    value " << buf.ptr << " of type "
-         << (METRIC_TYPE_TO_STRING(mt->family->type)) << "\n\n";
-  STRBUF_DESTROY(buf);
-
-  return stream.str();
+static double wf_parse_metric(metric_t *mt) {
+  switch (mt->family->type) {
+  case METRIC_TYPE_GAUGE:
+    return mt->value.gauge;
+  case METRIC_TYPE_COUNTER:
+    return static_cast<double>(mt->value.counter);
+  case METRIC_TYPE_COUNTER_FP:
+    return mt->value.counter_fp;
+  case METRIC_TYPE_UP_DOWN:
+    return static_cast<double>(mt->value.up_down);
+  case METRIC_TYPE_UP_DOWN_FP:
+    return mt->value.up_down_fp;
+  case METRIC_TYPE_UNTYPED:
+    break;
+  }
+  return NAN;
 }
 
 static int wf_write_callback(metric_family_t const *fam,
                              user_data_t *user_data) {
   auto host = label_set_get(fam->resource, "host.name");
   if (not host) {
-    P_ERROR("Unexpected metric family resource");
+    P_ERROR("Expected host as metric family resource");
     return ENOENT;
   }
   std::filesystem::path base;
   std::string_view tmp = host;
-  tmp.remove_suffix(1);
+  while (!tmp.empty() and tmp.back() == '.') {
+    tmp.remove_suffix(1);
+  }
   base /= tmp;
   base /= fam->name;
   for (size_t i = 0; i < fam->metric.num; i++) {
@@ -206,7 +242,7 @@ static int wf_config_callback(const char *key, const char *value) {
       dirs.set_path(value);
     }
   } else if (strcasecmp("Duration", key) == 0) {
-    dirs.set_delta(std::strtoul(value, NULL, 10));
+    dirs.set_delta(std::strtoul(value, nullptr, 10));
   } else {
     P_ERROR("Invalid configuration option (%s)", key);
     return -EINVAL;
