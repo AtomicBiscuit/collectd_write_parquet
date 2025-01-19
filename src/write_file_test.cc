@@ -144,15 +144,11 @@ private:
 public:
   Writer(std::filesystem::path path, std::chrono::seconds delta)
       : file(path, delta) {
-
-    builder.compression(parquet::Compression::ZSTD);
     writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
         file.get_stream(), schema, builder.build())};
   };
 
   Writer(const Writer &other) : file(other.file) {
-
-    builder.compression(parquet::Compression::ZSTD);
     writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
         file.get_stream(), schema, builder.build())};
   }
@@ -162,8 +158,6 @@ public:
       return *this;
     }
     file = other.file;
-
-    builder.compression(parquet::Compression::ZSTD);
     writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
         file.get_stream(), schema, builder.build())};
     return *this;
@@ -176,8 +170,6 @@ public:
       if (int err = file.recreate()) {
         return err;
       }
-
-      builder.compression(parquet::Compression::ZSTD);
       writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
           file.get_stream(), schema, builder.build())};
     }
