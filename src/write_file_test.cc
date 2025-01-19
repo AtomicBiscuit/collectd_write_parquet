@@ -42,122 +42,152 @@ extern "C" {
 #include <parquet/arrow/writer.h>
 #include <parquet/stream_writer.h>
 
-#define LOG_AND_RETURN_ON_ERROR(s, msg, ...)                                   \
-  int state = static_cast<int>((s));                                           \
-  if (state != 0) {                                                            \
-    P_ERROR((std::string((msg)) + ": %i").c_str(), __VA_ARGS__, state);        \
-    return state;                                                              \
-  }                                                                            \
-  }                                                                            \
-  while (0)
+#define LOG_AND_RETURN_ON_ERROR(e, msg, ...)                                   \
+  do {                                                                         \
+    int code = static_cast<int>((e));                                          \
+    if (code != 0) {                                                           \
+      P_ERROR((std::string((msg)) + ": %i").c_str(), __VA_ARGS__, code);       \
+      return code;                                                             \
+    }                                                                          \
+  } while (0)
 
-static const char *config_keys[] = {"BaseDir", "Duration"};
+static const char *config_keys[] = {"BaseDir", "Duration", "Compression"};
 static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
+static parquet::WriterProperties::Builder builder{};
+
+static std::string
+wf_time_point_to_string(std::chrono::system_clock::time_point point,
+                        std::string format) {
+  tm time_tm = {0};
+  char time_buf[100] = {};
+
+  time_t now = std::chrono::system_clock::to_time_t(point);
+  localtime_r(&now, &time_tm);
+  strftime(time_buf, sizeof(time_buf), format.c_str(), &time_tm);
+
+  return time_buf;
+}
 
 namespace {
-class Directory {
+class File {
 private:
   static const inline std::string base_name = "active.parquet";
   std::filesystem::path path{};
 
   std::chrono::seconds delta;
   std::chrono::system_clock::time_point creation_time{};
-
-  std::shared_ptr<arrow::io::FileOutputStream> file_handler{};
-  parquet::StreamWriter writer;
-  std::shared_ptr<parquet::schema::GroupNode> schema =
-      std::static_pointer_cast<parquet::schema::GroupNode>(
-          parquet::schema::GroupNode::Make("schema",
-                                           parquet::Repetition::REQUIRED,
-                                           {parquet::schema::Double("value")}));
-
-  std::mutex mut;
+  std::shared_ptr<arrow::io::FileOutputStream> file{};
 
 public:
-  static inline parquet::WriterProperties::Builder builder{};
-
-  Directory(std::filesystem::path path, std::chrono::seconds delta)
+  File(std::filesystem::path path, std::chrono::seconds delta)
       : path(std::move(path)), delta(delta),
         creation_time(std::chrono::system_clock::now()) {
-    recreate_();
+    recreate();
   };
 
-  Directory(const Directory &other)
+  File(const File &other)
       : path(other.path), delta(other.delta),
         creation_time(std::chrono::system_clock::now()) {
-    recreate_();
+    recreate();
   }
 
-  Directory &operator=(const Directory &other) {
+  File &operator=(const File &other) {
     if (&other == this) {
       return *this;
     }
-    if (file_handler) {
-      PARQUET_IGNORE_NOT_OK(file_handler->Close());
+    if (file and not file->closed()) {
+      PARQUET_IGNORE_NOT_OK(file->Close());
     }
     path = other.path;
     delta = other.delta;
     return *this;
   }
 
-  int write(double data) {
-    std::lock_guard lock(mut);
-    if (std::chrono::system_clock::now() - creation_time > delta) {
-      if (int err = recreate_()) {
-        return err;
-      }
-      creation_time = std::chrono::system_clock::now();
-    }
-    // P_WARNING("%i %li %i", writer.current_column(), writer.current_row(),
-    //           writer.num_columns());
-    writer << data << parquet::EndRow;
-    // writer << parquet::EndRowGroup;
-    //  P_WARNING("data: %f", data);
-    // PARQUET_IGNORE_NOT_OK(file_handler->Flush());
-    return 0;
+  bool is_active() {
+    return std::chrono::system_clock::now() - creation_time < delta;
   }
 
-private:
-  int recreate_() {
-    if (file_handler and not file_handler->closed()) {
-      // writer.~StreamWriter();
-      writer = parquet::StreamWriter();
-      LOG_AND_RETURN_ON_ERROR(file_handler->Close().code(),
-                              "file closing (%s) failed",
+  int recreate() {
+    if (file and not file->closed()) {
+      LOG_AND_RETURN_ON_ERROR(file->Close().code(), "file closing (%s) failed",
                               (path / base_name).c_str());
-
-      tm time_tm = {0};
-      char time_buf[28];
-
-      time_t now = std::chrono::system_clock::to_time_t(creation_time);
-      localtime_r(&now, &time_tm);
-      strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H.%M.%S.parquet",
-               &time_tm);
+      std::string time_str =
+          wf_time_point_to_string(creation_time, "%Y-%m-%d %H.%M.%S.parquet");
 
       std::error_code er{};
-      std::filesystem::rename(path / base_name, path / time_buf, er);
+      std::filesystem::rename(path / base_name, path / time_str, er);
       LOG_AND_RETURN_ON_ERROR(er.value(), "file renaming (%s) failed",
                               (path / base_name).c_str());
     }
     auto res = arrow::io::FileOutputStream::Open(path / base_name, false);
     LOG_AND_RETURN_ON_ERROR(res.status().code(), "file opening (%s) failed",
                             (path / base_name).c_str());
-    file_handler = std::move(res.ValueOrDie());
+    file = std::move(res.ValueOrDie());
 
-    // builder.compression(parquet::Compression::BROTLI);
+    creation_time = std::chrono::system_clock::now();
+    return 0;
+  }
+
+  std::shared_ptr<arrow::io::FileOutputStream> get_stream() { return file; }
+};
+class Writer {
+private:
+  File file;
+  parquet::StreamWriter writer;
+  std::shared_ptr<parquet::schema::GroupNode> schema =
+      std::static_pointer_cast<parquet::schema::GroupNode>(
+          parquet::schema::GroupNode::Make("schema",
+                                           parquet::Repetition::REQUIRED,
+                                           {parquet::schema::Double("value")}));
+  std::mutex mut;
+
+public:
+  Writer(std::filesystem::path path, std::chrono::seconds delta)
+      : file(path, delta) {
+
+    builder.compression(parquet::Compression::ZSTD);
     writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
-        file_handler,
-        std::static_pointer_cast<parquet::schema::GroupNode>(
-            parquet::schema::GroupNode::Make(
-                "schema", parquet::Repetition::REQUIRED,
-                {parquet::schema::Double("value")})),
-        builder.build())};
+        file.get_stream(), schema, builder.build())};
+  };
+
+  Writer(const Writer &other) : file(other.file) {
+
+    builder.compression(parquet::Compression::ZSTD);
+    writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
+        file.get_stream(), schema, builder.build())};
+  }
+
+  Writer &operator=(const Writer &other) {
+    if (&other == this) {
+      return *this;
+    }
+    file = other.file;
+
+    builder.compression(parquet::Compression::ZSTD);
+    writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
+        file.get_stream(), schema, builder.build())};
+    return *this;
+  }
+
+  int write(double data) {
+    std::lock_guard lock(mut);
+    if (not file.is_active()) {
+      writer = parquet::StreamWriter{};
+      if (int err = file.recreate()) {
+        return err;
+      }
+
+      builder.compression(parquet::Compression::ZSTD);
+      writer = parquet::StreamWriter{parquet::ParquetFileWriter::Open(
+          file.get_stream(), schema, builder.build())};
+    }
+    writer << data << parquet::EndRow;
     return 0;
   }
 };
 
 class DirectoryHandler {
-  std::map<std::string, Directory> dirs_{};
+  std::map<std::string, Writer> dirs_{};
   std::filesystem::path base_dir{};
   std::chrono::seconds delta{};
 
@@ -168,23 +198,23 @@ public:
 
   void set_delta(int seconds) { delta = std::chrono::seconds(seconds); }
 
-  Directory &get(const std::string &name) {
+  Writer &get(const std::string &name) {
     if (dirs_.find(name) != dirs_.end()) {
       return dirs_.at(name);
     }
     std::error_code err{};
     std::filesystem::create_directories(base_dir / name, err);
     if (err) {
-      P_ERROR("%s", err.message().c_str());
+      P_ERROR("directory creating (%s) error: %s", (base_dir / name).c_str(),
+              err.message().c_str());
     }
-    dirs_.emplace(name, Directory(base_dir / name, delta));
+    dirs_.emplace(name, Writer(base_dir / name, delta));
     return dirs_.at(name);
   }
 };
 } // namespace
 
 static DirectoryHandler dirs{};
-static enum class StreamType { file, out, err } stream_type = StreamType::out;
 
 static double wf_parse_metric(metric_t *mt) {
   switch (mt->family->type) {
@@ -233,16 +263,22 @@ static int wf_write_callback(metric_family_t const *fam,
 
 static int wf_config_callback(const char *key, const char *value) {
   if (strcasecmp("BaseDir", key) == 0) {
-    if (strcasecmp(value, "stdout") == 0) {
-      stream_type = StreamType::out;
-    } else if (strcasecmp(value, "stderr") == 0) {
-      stream_type = StreamType::err;
-    } else {
-      stream_type = StreamType::file;
-      dirs.set_path(value);
-    }
+    dirs.set_path(value);
   } else if (strcasecmp("Duration", key) == 0) {
     dirs.set_delta(std::strtoul(value, nullptr, 10));
+  } else if (strcasecmp("Compression", key) == 0) {
+    if (strcasecmp("Uncompressed", value)) {
+      builder.compression(parquet::Compression::UNCOMPRESSED);
+    } else if (strcasecmp("BROTLI", value)) {
+      builder.compression(parquet::Compression::BROTLI);
+    } else if (strcasecmp("GZIP", value)) {
+      builder.compression(parquet::Compression::GZIP);
+    } else if (strcasecmp("ZSTD", value)) {
+      builder.compression(parquet::Compression::ZSTD);
+    } else {
+      P_ERROR("Invalid compression type (%s)", value);
+      return EINVAL;
+    }
   } else {
     P_ERROR("Invalid configuration option (%s)", key);
     return -EINVAL;
