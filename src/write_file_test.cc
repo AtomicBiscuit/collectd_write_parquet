@@ -188,7 +188,6 @@ public:
         for (DataType value: buffer) {
             writer << value << parquet::EndRow;
         }
-        P_WARNING("flush:  %lu", buffer.size());
         buffer_size -= buffer.size();
         buffer_flush_time = system_clock::now();
         buffer.clear();
@@ -198,7 +197,6 @@ public:
         std::lock_guard lock(mut);
         DataType data = std::get<DataType>(raw_data);
         if (not file.is_active()) {
-            P_WARNING(".................................................................RECREATING");
             flush();
             writer = parquet::StreamWriter{};
             if (int err = file.recreate()) {
@@ -209,9 +207,6 @@ public:
             };
         }
         if (not is_buffer_active()) {
-            if (system_clock::now() - buffer_flush_time > buffer_duration) {
-                P_WARNING(".................................................................buffer has exceed!!!!!!");
-            }
             flush();
         }
         buffer.push_back(data);
@@ -322,8 +317,6 @@ static int wf_write_callback(metric_family_t const *fam,
             writer->write(wf_parse_metric_int(mt));
         }
     }
-    P_WARNING("BUFF CAP: %lu, SIZE: %lu, REMAIN %lu", buffer_capacity, buffer_size.load(),
-              buffer_capacity - buffer_size);
     return 0;
 }
 
