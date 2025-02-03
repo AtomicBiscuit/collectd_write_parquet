@@ -6994,13 +6994,13 @@ plugin_virt="no"
 plugin_vmem="no"
 plugin_vserver="no"
 plugin_wireless="no"
-plugin_write_file_test="no"
 plugin_write_graphite="yes"
 plugin_write_http="yes"
 plugin_write_influxdb_udp="yes"
 plugin_write_kafka="$with_librdkafka"
 plugin_write_log="no"
 plugin_write_mongodb="$with_libmongoc"
+plugin_write_parquet="no"
 plugin_write_prometheus="no"
 plugin_write_redis="yes"
 plugin_write_riemann="$with_libriemann_client"
@@ -7050,7 +7050,7 @@ if test "x$ac_system" = "xLinux"; then
   plugin_vmem="yes"
   plugin_vserver="yes"
   plugin_wireless="yes"
-  plugin_write_file_test="$with_libparquet"
+  plugin_write_parquet="$with_libparquet"
   plugin_zfs_arc="yes"
 
   if test "x$ac_cv_header_linux_ip_vs_h" = "xyes"; then
@@ -7702,13 +7702,13 @@ AC_PLUGIN([virt],                [$plugin_virt],              [Virtual machine s
 AC_PLUGIN([vmem],                [$plugin_vmem],              [Virtual memory statistics])
 AC_PLUGIN([vserver],             [$plugin_vserver],           [Linux VServer statistics])
 AC_PLUGIN([wireless],            [$plugin_wireless],          [Wireless statistics])
-AC_PLUGIN([write_file_test],     [$plugin_write_file_test],   [File output plugin])
 AC_PLUGIN([write_graphite],      [$plugin_write_graphite],    [Graphite / Carbon output plugin])
 AC_PLUGIN([write_http],          [$plugin_write_http],        [HTTP output plugin])
 AC_PLUGIN([write_influxdb_udp],  [$plugin_write_influxdb_udp],[Influxdb udp output plugin])
 AC_PLUGIN([write_kafka],         [$plugin_write_kafka],       [Kafka output plugin])
 AC_PLUGIN([write_log],           [$plugin_write_log],         [Log output plugin])
 AC_PLUGIN([write_mongodb],       [$plugin_write_mongodb],     [MongoDB output plugin])
+AC_PLUGIN([write_parquet],       [$plugin_write_parquet],     [File output plugin])
 AC_PLUGIN([write_prometheus],    [$plugin_write_prometheus],  [Prometheus write plugin])
 AC_PLUGIN([write_redis],         [$plugin_write_redis],       [Redis output plugin])
 AC_PLUGIN([write_riemann],       [$plugin_write_riemann],     [Riemann output plugin])
@@ -8151,13 +8151,13 @@ AC_MSG_RESULT([    virt  . . . . . . . . $enable_virt])
 AC_MSG_RESULT([    vmem  . . . . . . . . $enable_vmem])
 AC_MSG_RESULT([    vserver . . . . . . . $enable_vserver])
 AC_MSG_RESULT([    wireless  . . . . . . $enable_wireless])
-AC_MSG_RESULT([    write_file_test . . . $enable_write_file_test])
 AC_MSG_RESULT([    write_graphite  . . . $enable_write_graphite])
 AC_MSG_RESULT([    write_http  . . . . . $enable_write_http])
 AC_MSG_RESULT([    write_influxdb_udp. . $enable_write_influxdb_udp])
 AC_MSG_RESULT([    write_kafka . . . . . $enable_write_kafka])
 AC_MSG_RESULT([    write_log . . . . . . $enable_write_log])
 AC_MSG_RESULT([    write_mongodb . . . . $enable_write_mongodb])
+AC_MSG_RESULT([    write_parquet . . . . $enable_write_parquet])
 AC_MSG_RESULT([    write_prometheus. . . $enable_write_prometheus])
 AC_MSG_RESULT([    write_redis . . . . . $enable_write_redis])
 AC_MSG_RESULT([    write_riemann . . . . $enable_write_riemann])

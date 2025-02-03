@@ -2314,12 +2314,12 @@ wireless_la_SOURCES = src/wireless.c
 wireless_la_LDFLAGS = $(PLUGIN_LDFLAGS)
 endif
 
-if BUILD_PLUGIN_WRITE_FILE_TEST
-pkglib_LTLIBRARIES += write_file_test.la
-write_file_test_la_SOURCES = src/write_file_test.cc
-write_file_test_la_CPPFLAGS = $(AM_CPPFLAGS) $(BUILD_WITH_LIBPARQUET_CPPFLAGS)
-write_file_test_la_LDFLAGS = $(PLUGIN_LDFLAGS) $(BUILD_WITH_LIBPARQUET_LDFLAGS)
-write_file_test_la_LIBADD = $(BUILD_WITH_LIBPARQUET_LIBS)
+if BUILD_PLUGIN_WRITE_PARQUET
+pkglib_LTLIBRARIES += write_parquet.la
+write_parquet_la_SOURCES = src/write_parquet.cc
+write_parquet_la_CPPFLAGS = $(AM_CPPFLAGS) $(BUILD_WITH_LIBPARQUET_CPPFLAGS)
+write_parquet_la_LDFLAGS = $(PLUGIN_LDFLAGS) $(BUILD_WITH_LIBPARQUET_LDFLAGS)
+write_parquet_la_LIBADD = $(BUILD_WITH_LIBPARQUET_LIBS)
 endif
 
 if BUILD_PLUGIN_WRITE_GRAPHITE
