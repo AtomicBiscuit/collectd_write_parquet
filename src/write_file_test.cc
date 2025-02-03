@@ -44,27 +44,29 @@ extern "C" {
 #include <parquet/arrow/writer.h>
 #include <parquet/stream_writer.h>
 
-#define LOG_AND_RETURN_ON_ERROR(e, msg, ...)                                   \
+#define RETURN_ON_ERROR(e, msg, ...)                                           \
   do {                                                                         \
     int code = static_cast<int>((e));                                          \
     if (code != 0) {                                                           \
-      P_ERROR((std::string((msg)) + ": %i").c_str(), __VA_ARGS__, code);       \
+      P_ERROR((msg), __VA_ARGS__, code);                                       \
       return code;                                                             \
     }                                                                          \
   } while (0)
 
-
 using std::chrono::system_clock;
-
 using time_point = system_clock::time_point;
 using node_shared_ptr = std::shared_ptr<parquet::schema::GroupNode>;
+
 
 static const char *config_keys[] = {"basedir", "fileduration", "compression", "buffersize", "bufferduration"};
 static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
 
 
+static std::filesystem::path base_directory = "";
+
 static const inline std::string filename = "active.parquet";
 static std::chrono::seconds file_duration = std::chrono::seconds(3600);
+
 static std::chrono::seconds buffer_duration = std::chrono::seconds(300);
 static uint64_t buffer_capacity = 10000;
 static std::atomic<uint64_t> buffer_size = 0;
@@ -119,9 +121,7 @@ private:
     time_point creation_time{};
     std::shared_ptr<arrow::io::FileOutputStream> file{};
 public:
-    File(const std::filesystem::path &path) :
-            path(path), path_str((path / filename).string()),
-            creation_time(system_clock::now()) {
+    File(const std::filesystem::path &path) : path(path), path_str((path / filename).string()) {
         recreate();
     };
 
@@ -129,21 +129,22 @@ public:
         return system_clock::now() - creation_time < file_duration;
     }
 
-    int recreate() {
-        if (file and not file->closed()) {
-            LOG_AND_RETURN_ON_ERROR(file->Close().code(), "file closing (%s) failed",
-                                    path_str.c_str());
-            std::string time_str =
-                    wf_time_point_to_string(creation_time, "%Y%m%dT%H%M%S.parquet");
-
-            std::error_code error_code{};
-            std::filesystem::rename(path_str, path / time_str, error_code);
-            LOG_AND_RETURN_ON_ERROR(error_code.value(), "file renaming (%s) failed",
-                                    path_str.c_str());
+    int rename() {
+        if (not file or file->closed()) {
+            return 0;
         }
+        RETURN_ON_ERROR(file->Close().code(), "file closing (%s) failed: %i", path_str.c_str());
+        std::string time_str = wf_time_point_to_string(creation_time, "%Y%m%dT%H%M%S.parquet");
+
+        std::error_code error_code{};
+        std::filesystem::rename(path_str, path / time_str, error_code);
+        RETURN_ON_ERROR(error_code.value(), "file renaming (%s) failed: %i", path_str.c_str());
+        return 0;
+    }
+
+    int recreate() {
         auto res = arrow::io::FileOutputStream::Open(path_str, false);
-        LOG_AND_RETURN_ON_ERROR(res.status().code(), "file opening (%s) failed",
-                                path_str.c_str());
+        RETURN_ON_ERROR(res.status().code(), "file opening (%s) failed: %i", path_str.c_str());
         file = std::move(res.ValueOrDie());
 
         creation_time = system_clock::now();
@@ -157,6 +158,10 @@ class IWriter {
 public:
     virtual void flush() = 0;
 
+    virtual int close() = 0;
+
+    virtual int open() = 0;
+
     virtual int write(std::variant<int64_t, double>) = 0;
 
     virtual ~IWriter() = default;
@@ -168,61 +173,78 @@ private:
     File file;
     parquet::StreamWriter writer;
     node_shared_ptr schema;
-    std::mutex mut;
+    std::mutex file_mutex;
 
     time_point buffer_flush_time{};
     std::vector<DataType> buffer{};
 public:
-    Writer(const std::filesystem::path &path, const node_shared_ptr &schema) :
-            file(path), schema(schema), buffer_flush_time(system_clock::now()) {
+    Writer(const std::filesystem::path &path, node_shared_ptr schema_) : file(path), schema(std::move(schema_)) {
         writer = parquet::StreamWriter{
                 parquet::ParquetFileWriter::Open(file.stream(), schema, properties_builder.build())
         };
     };
 
     bool is_buffer_active() {
-        return buffer_size < buffer_capacity and system_clock::now() - buffer_flush_time < buffer_duration;
+        return system_clock::now() - buffer_flush_time < buffer_duration;
     }
 
     void flush() override {
         for (DataType value: buffer) {
             writer << value << parquet::EndRow;
         }
-        buffer_size -= buffer.size();
+        buffer_size.fetch_sub(buffer.size());
         buffer_flush_time = system_clock::now();
         buffer.clear();
     }
 
+    int close() override {
+        flush();
+        writer = parquet::StreamWriter{};
+        if (int err = file.rename()) {
+            return err;
+        }
+        return 0;
+    }
+
+    int open() override {
+        if (int err = close()) {
+            return err;
+        }
+        if (int err = file.recreate()) {
+            return err;
+        }
+        writer = parquet::StreamWriter{
+                parquet::ParquetFileWriter::Open(file.stream(), schema, properties_builder.build())
+        };
+        return 0;
+    }
+
     int write(std::variant<int64_t, double> raw_data) override {
-        std::lock_guard lock(mut);
+        std::lock_guard lock(file_mutex);
         DataType data = std::get<DataType>(raw_data);
         if (not file.is_active()) {
-            flush();
-            writer = parquet::StreamWriter{};
-            if (int err = file.recreate()) {
-                return err;
-            }
-            writer = parquet::StreamWriter{
-                    parquet::ParquetFileWriter::Open(file.stream(), schema, properties_builder.build())
-            };
+            open();
         }
         if (not is_buffer_active()) {
             flush();
         }
-        buffer.push_back(data);
-        buffer_size++;
+
+        uint64_t new_size = buffer_size.fetch_add(1);
+        if (new_size >= buffer_capacity) {
+            flush();
+            buffer_size.fetch_add(-1);
+            writer << data << parquet::EndRow;
+        } else {
+            buffer.push_back(data);
+        }
         return 0;
     }
 };
 
 class Director {
     std::map<std::string, std::shared_ptr<IWriter>> dirs{};
-    std::filesystem::path base_dir{};
-
 public:
     Director() = default;
-
-    void set_path(const std::string &path) { base_dir = path; }
 
     template<typename DataType>
     std::shared_ptr<IWriter> get(const std::string &name, const node_shared_ptr &schema) {
@@ -230,13 +252,17 @@ public:
             return dirs.at(name);
         }
         std::error_code error_code{};
-        std::filesystem::create_directories(base_dir / name, error_code);
+        std::filesystem::create_directories(base_directory / name, error_code);
         if (error_code) {
-            P_ERROR("directory creating (%s) error: %s", (base_dir / name).c_str(),
+            P_ERROR("directory creating (%s) error: %s", (base_directory / name).c_str(),
                     error_code.message().c_str());
         }
-        dirs.emplace(name, std::make_shared<Writer<DataType>>(base_dir / name, schema));
+        dirs.emplace(name, std::make_shared<Writer<DataType>>(base_directory / name, schema));
         return dirs.at(name);
+    }
+
+    std::map<std::string, std::shared_ptr<IWriter>> &get_all() {
+        return dirs;
     }
 };
 } // namespace
@@ -287,11 +313,11 @@ static MetricValueType wf_get_metric_type(const metric_t *mt) {
     return MetricValueType::NONE;
 }
 
-static int wf_write_callback(metric_family_t const *fam,
-                             user_data_t *user_data) {
+static int wf_write_callback(metric_family_t const *fam, user_data_t *user_data) {
+    P_WARNING("%lu from %lu delta: %lu", buffer_size.load(), buffer_capacity, buffer_capacity - buffer_size);
     auto host = label_set_get(fam->resource, "host.name");
     if (not host) {
-        P_ERROR("Expected host as metric family resource");
+        P_ERROR("Expected host.name as metric family resource");
         return ENOENT;
     }
     std::filesystem::path base;
@@ -301,6 +327,7 @@ static int wf_write_callback(metric_family_t const *fam,
     }
     base /= tmp;
     base /= fam->name;
+
     for (size_t i = 0; i < fam->metric.num; i++) {
         metric_t *mt = fam->metric.ptr + i;
         std::filesystem::path full_path = base;
@@ -322,7 +349,7 @@ static int wf_write_callback(metric_family_t const *fam,
 
 static int wf_config_callback(const char *key, const char *value) {
     if (strcasecmp("basedir", key) == 0) {
-        handler.set_path(value);
+        base_directory = value;
     } else if (strcasecmp("fileduration", key) == 0) {
         file_duration = std::chrono::seconds(std::strtoul(value, nullptr, 10));
     } else if (strcasecmp("bufferduration", key) == 0) {
@@ -349,10 +376,41 @@ static int wf_config_callback(const char *key, const char *value) {
     return 0;
 }
 
+static int wf_init_callback() {
+    if (buffer_duration > file_duration) {
+        P_ERROR("Buffer containing duration(%lu) must be less than file existing time(%lu)", buffer_duration.count(),
+                file_duration.count());
+        return EINVAL;
+    }
+    return 0;
+}
+
+static int wf_flush_callback(cdtime_t timeout, const char *identifier, user_data_t *user_data) {
+    if (timeout > 0) {
+        return 0;
+    }
+    for (auto &[path, writer]: handler.get_all()) {
+        writer->flush();
+    }
+    return 0;
+}
+
+static int wf_shutdown_callback() {
+    for (auto &[path, writer]: handler.get_all()) {
+        if (int err = writer->close()) {
+            return err;
+        }
+    }
+    return 0;
+}
+
 extern "C" {
 void module_register(void) {
     plugin_register_config("write_file_test", wf_config_callback, config_keys,
                            config_keys_num);
+    plugin_register_init("write_file_test", wf_init_callback);
     plugin_register_write("write_file_test", wf_write_callback, NULL);
+    plugin_register_flush("write_file_test", wf_flush_callback, NULL);
+    plugin_register_shutdown("write_file_test", wf_shutdown_callback);
 }
 }
