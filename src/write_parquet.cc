@@ -314,7 +314,6 @@ static MetricValueType wf_get_metric_type(const metric_t *mt) {
 }
 
 static int wf_write_callback(metric_family_t const *fam, user_data_t *user_data) {
-    P_WARNING("%lu from %lu delta: %lu", buffer_size.load(), buffer_capacity, buffer_capacity - buffer_size);
     auto host = label_set_get(fam->resource, "host.name");
     if (not host) {
         P_ERROR("Expected host.name as metric family resource");
