@@ -4277,7 +4277,6 @@ PKG_CHECK_MODULES([PARQUET], [arrow parquet],
   [with_libparquet="no (pkg-config could not find libparquet)"]
 )
 fi
-
 if test "x$withval" != "xno"; then
   AC_MSG_CHECKING([whether $CXX accepts -std=c++17])
   if test_cxx_flags -std=c++17; then
@@ -4287,7 +4286,6 @@ if test "x$withval" != "xno"; then
     with_libparquet="no (requires C++17 support)"
     fi
 fi
-
 if test "x$with_libparquet" = "xyes"; then
   AC_LANG_PUSH(C++)
   SAVE_CPPFLAGS="$CPPFLAGS"
@@ -4299,7 +4297,6 @@ if test "x$with_libparquet" = "xyes"; then
   CPPFLAGS="$SAVE_CPPFLAGS"
   AC_LANG_POP(C++)
 fi
-
 if test "x$with_libparquet" = "xyes"; then
   AC_LANG_PUSH(C++)
   SAVE_CPPFLAGS="$CPPFLAGS"
@@ -4336,7 +4333,6 @@ if test "x$with_libparquet" = "xyes"; then
   LIBS="$SAVE_LIBS"
   AC_LANG_POP(C++)
 fi
-
 BUILD_WITH_LIBPARQUET_CPPFLAGS="-std=c++17 $with_libparquet_cppflags"
 BUILD_WITH_LIBPARQUET_LDFLAGS="$with_libparquet_ldflags"
 BUILD_WITH_LIBPARQUET_LIBS="-larrow -lparquet"
